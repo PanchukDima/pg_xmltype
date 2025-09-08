@@ -14,13 +14,13 @@
 
 add_postgresql_extension(
   pg_xmltype
-  VERSION 1.2
+  VERSION 1.3
   SOURCES pg_xmltype.c
-  SCRIPTS pg_xmltype--1.2.sql
+  SCRIPTS pg_xmltype--1.3.sql
   REGRESS basic)
 
 target_sources(pg_xmltype
   PRIVATE
-    pg_xmltype--1.2.sql
+  pg_xmltype--1.3.sql
     pg_xmltype.h
 )
