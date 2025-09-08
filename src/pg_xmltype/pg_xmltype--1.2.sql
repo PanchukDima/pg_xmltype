@@ -22,3 +22,8 @@ CREATE FUNCTION deletexml(p_xml xml, p_xpath_str text)
     RETURNS xml
     AS 'MODULE_PATHNAME', 'deletexml'
     LANGUAGE C IMMUTABLE STRICT;
+
+CREATE FUNCTION getarrayxml(p_xml xml, p_xpath_str text)
+    RETURNS xml[]
+    AS 'MODULE_PATHNAME', 'getarrayxml'
+    LANGUAGE C IMMUTABLE STRICT;
