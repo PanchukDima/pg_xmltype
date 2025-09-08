@@ -28,8 +28,11 @@
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 #include <libxml/xpath.h>
+#include "libxml/xmlsave.h"
 
-
+#include "utils/array.h"
+#include "utils/elog.h"
+#include "catalog/pg_type.h"
 
 
 
@@ -225,3 +228,203 @@ Datum deletexml(PG_FUNCTION_ARGS) {
 
   PG_RETURN_XML_P(node);
 }
+
+PG_FUNCTION_INFO_V1(getarrayxml);
+
+Datum
+getarrayxml(PG_FUNCTION_ARGS)
+{
+  xmltype    *xml_data;
+  text       *xpath_text;
+  char       *xpath_str = "//*"; // default value
+  xmlDocPtr   doc = NULL;
+  xmlXPathContextPtr context = NULL;
+  xmlXPathObjectPtr result = NULL;
+  xmlNodeSetPtr nodes;
+  Datum      *dvalues = NULL;
+  bool       *dnulls = NULL;
+  ArrayType  *array;
+  int         i;
+  int         count;
+  MemoryContext oldcontext;
+
+  if (PG_ARGISNULL(0))
+    PG_RETURN_NULL();
+
+  xml_data = PG_GETARG_XML_P(0);
+
+  if (!PG_ARGISNULL(1))
+  {
+    xpath_text = PG_GETARG_TEXT_P(1);
+    xpath_str = text_to_cstring(xpath_text);
+  }
+
+  /* Switch to multi-call memory context for large allocations */
+  oldcontext = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+
+  /* Parse XML document */
+  doc = xmlParseMemory(VARDATA(xml_data), VARSIZE(xml_data) - VARHDRSZ);
+  if (doc == NULL)
+  {
+    MemoryContextSwitchTo(oldcontext);
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_XML_DOCUMENT),
+             errmsg("invalid XML document")));
+  }
+
+  /* Create XPath context */
+  context = xmlXPathNewContext(doc);
+  if (context == NULL)
+  {
+    xmlFreeDoc(doc);
+    MemoryContextSwitchTo(oldcontext);
+    ereport(ERROR,
+            (errcode(ERRCODE_OUT_OF_MEMORY),
+             errmsg("could not create XPath context")));
+  }
+
+  /* Evaluate XPath expression */
+  result = xmlXPathEvalExpression((xmlChar *)xpath_str, context);
+  if (result == NULL)
+  {
+    xmlXPathFreeContext(context);
+    xmlFreeDoc(doc);
+    MemoryContextSwitchTo(oldcontext);
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_XML_DOCUMENT),
+             errmsg("XPath evaluation failed")));
+  }
+
+  if (result->type != XPATH_NODESET)
+  {
+    xmlXPathFreeObject(result);
+    xmlXPathFreeContext(context);
+    xmlFreeDoc(doc);
+    MemoryContextSwitchTo(oldcontext);
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("XPath expression must return a node set")));
+  }
+
+  nodes = result->nodesetval;
+  count = (nodes != NULL) ? nodes->nodeNr : 0;
+
+  /* Allocate memory for array elements */
+  dvalues = (Datum *) palloc(count * sizeof(Datum));
+  dnulls = (bool *) palloc(count * sizeof(bool));
+  memset(dnulls, false, count * sizeof(bool));
+
+  /* Convert nodes to XML datums */
+  for (i = 0; i < count; i++)
+  {
+    xmlBufferPtr buf = NULL;
+    xmlNodePtr node = nodes->nodeTab[i];
+    xmlChar *node_str;
+    int node_len;
+    char *c_node_str;
+
+    buf = xmlBufferCreate();
+    if (buf == NULL)
+    {
+      ereport(WARNING,
+              (errcode(ERRCODE_OUT_OF_MEMORY),
+               errmsg("failed to create XML buffer")));
+      dnulls[i] = true;
+      continue;
+    }
+
+    xmlNodeDump(buf, doc, node, 0, 1);
+
+    node_str = xmlBufferContent(buf);
+    node_len = xmlBufferLength(buf);
+
+    if (node_str != NULL && node_len > 0)
+    {
+      /* Convert xmlChar* to char* for xml_in */
+      c_node_str = (char *)node_str;
+      xmltype *xml_node = xmlparse(cstring_to_text(c_node_str), XMLOPTION_CONTENT, false);
+      dvalues[i] = PointerGetDatum(xml_node);
+    }
+    else
+    {
+      dnulls[i] = true;
+    }
+
+    if (buf != NULL)
+      xmlBufferFree(buf);
+  }
+
+  /* Create result array */
+  if (count > 0)
+  {
+    int dims[1];
+    int lbs[1];
+
+    dims[0] = count;
+    lbs[0] = 1;
+
+    array = construct_md_array(dvalues, dnulls, 1, dims, lbs,
+                               XMLOID, -1, false, 'd');
+  }
+  else
+  {
+    array = construct_empty_array(XMLOID);
+  }
+
+  /* Cleanup */
+  if (result != NULL)
+    xmlXPathFreeObject(result);
+  if (context != NULL)
+    xmlXPathFreeContext(context);
+  if (doc != NULL)
+    xmlFreeDoc(doc);
+
+  if (dvalues != NULL)
+    pfree(dvalues);
+  if (dnulls != NULL)
+    pfree(dnulls);
+
+  if (xpath_str != "//*")
+    pfree(xpath_str);
+
+  MemoryContextSwitchTo(oldcontext);
+  PG_RETURN_ARRAYTYPE_P(array);
+}
+
+/*Datum getarrayxml(PG_FUNCTION_ARGS) {
+
+  elog(NOTICE, "START");
+  xmltype *node = PG_GETARG_XML_P(0);
+  text *xpath_str = PG_GETARG_TEXT_P(1);
+  ArrayType  *arr;
+  Datum      *dvalues;
+  bool       *dnulls;
+  int         ndims;
+  int         dims[1];
+  int         lbs[1];
+  int         nelems;
+  int         i;
+  elog(NOTICE, "Work");
+  PG_TRY();
+  {
+    dims[0] = 1;
+    lbs[0] = 1;
+
+    dvalues = (Datum *) palloc(sizeof(Datum));
+    dnulls = (bool *) palloc(sizeof(bool));
+
+    dvalues[0] = node;
+    dnulls[0] = false;
+
+    arr = construct_md_array(dvalues, dnulls, 1, dims, lbs,
+                                XMLOID, -1, false, 'd');
+    PG_RETURN_ARRAYTYPE_P(arr);
+  }
+  PG_CATCH();
+  {
+    elog(NOTICE, "Error build array");
+    arr = construct_empty_array(XMLOID);
+    PG_RETURN_ARRAYTYPE_P(arr);
+  }
+  PG_END_TRY();
+}*/
